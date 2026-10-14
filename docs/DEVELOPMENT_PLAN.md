@@ -1,6 +1,6 @@
 # پلن توسعه — سامانه هوشمند اطلاع‌رسانی و پاسخگویی بحران (آگاه‌یار)
 
-نسخه ۱.۰ · ۱۴ اکتبر ۲۰۲۶ · مبنا: [SRS](SRS.md) و [SAS](SAS.md)
+نسخه ۱.۱ · ۱۴ اکتبر ۲۰۲۶ · تغییر: Keycloak مرجع هویت و Audit · مبنا: [SRS](SRS.md) و [SAS](SAS.md)
 
 این سند کار ۸ ماهه را به ۸ فاز تقسیم می‌کند. برای هر فاز، نیازمندی‌های SRS، خروجی و معیار اتمام آن آمده است. پرامپت‌های آماده هر بسته کاری هم در بخش ۸ است. خروجی ماه ۴ (MVP) پایان فاز ۳ و خروجی ماه ۸ (پایلوت) پایان فاز ۷ است.
 
@@ -18,7 +18,7 @@
 | صف رویداد | Apache Kafka (KRaft) + aiokafka | ستون Speed Layer |
 | کش و قفل | Redis | Rate limit، session، کش |
 | ذخیره شیء | MinIO | لایه Raw، Archive، فایل‌ها |
-| هویت | Keycloak (on-prem) | OAuth2/OIDC، JWT، MFA؛ بدون وابستگی خارجی |
+| هویت و Audit | Keycloak 26 (on-prem، نسخه pin‌شده) | OAuth2/OIDC، JWT، MFA، محدوده جغرافیایی با Group؛ مرجع Audit (بخش ۱-۳)؛ بدون وابستگی خارجی |
 | مدل زبانی | LLM محلی (مثل GPT-OSS) روی vLLM با API سازگار OpenAI | هیچ فراخوانی به سرویس خارج از کشور |
 | NLP فارسی | Hazm، ParsBERT، spaCy | |
 | رابط کاربری | React 18 + TypeScript (strict) + Vite | |
@@ -44,6 +44,31 @@ SAS چهارده سرویس تعریف کرده است. تیم چهار نفره
 ### ۱-۲. اپلیکیشن موبایل
 
 جدول ۳ پروپوزال اپلیکیشن موبایل شهروندی را خواسته است. برای پایلوت، **PWA** (همان React) پیشنهاد می‌شود: عکس، موقعیت و نوتیفیکیشن را پوشش می‌دهد و نیاز به انتشار در فروشگاه ندارد. اپ بومی به بعد از پایلوت موکول می‌شود. این مورد نیز نیازمند تأیید کارفرماست.
+
+### ۱-۳. Keycloak به‌عنوان مرجع هویت و Audit
+
+Keycloak هم هویت و دسترسی را مدیریت می‌کند و هم مرجع Audit سامانه است. پیکربندی آن کاملاً با اسکریپت انجام می‌شود (پرامپت P0.5) و هیچ تنظیمی دستی در کنسول انجام نمی‌شود.
+
+**ریلم‌ها:**
+
+| ریلم | کاربران | کلاینت‌ها | ورود |
+| --- | --- | --- | --- |
+| `master` | فقط ادمین Keycloak | — | کنسول ادمین فقط از شبکه مدیریت؛ MFA |
+| `crisis-ops` | مدیران ملی، استانی، محلی، کارشناسان، کارشناس داده، مدیر سامانه | `crisis-web` (public، PKCE)، `crisis-api` (confidential، bearer-only)، `crisis-worker` (service account برای سرویس‌ها)، `crisis-audit-reader` (service account فقط‌خواندنی رویدادها) | رمز + OTP اجباری برای نقش‌های مدیر و تأییدکننده |
+| `crisis-citizen` | شهروندان | `citizen-pwa` (public، PKCE) | ثبت‌نام آزاد؛ ورود فقط برای ارسال گزارش؛ مشاهده هشدار بدون ورود |
+
+**محدوده جغرافیایی:** ساختار Group سلسله‌مراتبی در `crisis-ops`: `/national`، `/province/tehran`، `/province/tehran/city/<name>` و همین الگو برای مرکزی و هرمزگان. هر Group ویژگی `geo_scope` دارد و یک Protocol Mapper آن را به همراه نقش‌ها در توکن قرار می‌دهد. بک‌اند محدوده را فقط از توکن می‌خواند.
+
+**Audit در Keycloak:**
+
+- **رویدادهای کاربر** (ورود، خروج، ورود ناموفق، OTP، تمدید توکن، تغییر رمز) و **رویدادهای ادمین** (ایجاد و تغییر کاربر، نقش، Group، کلاینت، با جزئیات) در هر سه ریلم فعال است، با زمان نگهداری مصوب.
+- **اقدامات کسب‌وکاری** (ثبت بحران، تأیید و رد پیام، انتشار، توقف اضطراری، تغییر قاعده، آزادسازی قرنطینه) هم به Keycloak فرستاده می‌شوند. Keycloak برای ثبت رویداد از بیرون API عمومی ندارد؛ بنابراین یک افزونه SPI جاوا به نام `crisis-audit-spi` ساخته می‌شود که:
+    1. یک Realm Resource با مسیر `/realms/crisis-ops/crisis-audit/events` اضافه می‌کند که فقط کلاینت `crisis-api` با نقش `audit-writer` می‌تواند رویداد بنویسد. رویداد شامل شناسه کاربر، شناسه session کیکلاک، اقدام، منبع، محدوده جغرافیایی و نتیجه است.
+    2. یک Event Listener که همه رویدادهای کاربر، ادمین و کسب‌وکاری را با زنجیره هش در جدول append-only ذخیره و همزمان به SIEM/SOC کارفرما (syslog یا CEF) ارسال می‌کند.
+- **مشاهده و گزارش:** صفحه Audit در پنل مدیریت از طریق کلاینت `crisis-audit-reader` رویدادها را از Keycloak می‌خواند؛ برنامه هیچ جدول Audit جداگانه‌ای ندارد.
+- **تاب‌آوری:** اگر Keycloak در دسترس نباشد، بک‌اند رویداد کسب‌وکاری را در Outbox محلی نگه می‌دارد و پس از بازگشت ارسال می‌کند؛ هیچ اقدامی بدون ثبت Audit از دست نمی‌رود.
+
+**ریسک این انتخاب:** Keycloak برای Audit کسب‌وکاری طراحی نشده است. نگهداری افزونه SPI با هر ارتقای نسخه Keycloak باید آزمون شود و حجم رویداد کسب‌وکاری بار پایگاه داده Keycloak را بالا می‌برد. این تصمیم در ADR-09 ثبت می‌شود.
 
 ---
 
@@ -105,8 +130,8 @@ crisis/
 │       ├── main.py
 │       ├── core/            # config، logging، db، security، kafka، errors
 │       ├── modules/
-│       │   ├── iam/         # T11 — هویت، نقش، محدوده جغرافیایی
-│       │   ├── audit/       # T11 — Audit Trail
+│       │   ├── iam/         # T11 — اعتبارسنجی توکن Keycloak، مجوز، محدوده جغرافیایی
+│       │   ├── audit/       # T11 — کلاینت Audit کیکلاک (نوشتن با Outbox، خواندن)
 │       │   ├── crisis/      # T1، T10 — پرونده بحران، State Machine
 │       │   ├── sources/     # T2 — Source Registry، Connectorها
 │       │   ├── stream/      # T3 — پردازش بلادرنگ
@@ -129,6 +154,10 @@ crisis/
 │   ├── docker-compose.yml
 │   ├── helm/
 │   └── keycloak/
+│       ├── bootstrap.sh         # اسکریپت idempotent ساخت ریلم‌ها با kcadm.sh
+│       ├── config/              # تعریف ریلم، نقش، Group و کلاینت (منبع حقیقت)
+│       ├── crisis-audit-spi/    # افزونه جاوا: API ثبت رویداد + Event Listener
+│       └── themes/crisis-fa/    # تم فارسی و RTL صفحه ورود
 └── docs/
 ```
 
@@ -157,11 +186,11 @@ modules/<name>/
 | --- | --- | --- | --- | --- |
 | AFTA-01 | بومی‌سازی و حاکمیت داده | همه داده، لاگ و مدل در مرکز داده داخل کشور؛ هیچ فراخوانی به سرویس خارجی (LLM، نقشه، CDN، فونت، تلمتری) | ۰ | سیاست egress شبکه deny-by-default؛ تست خودکار عدم وجود URL خارجی در build |
 | AFTA-02 | زنجیره تأمین نرم‌افزار | همه وابستگی‌ها از مخزن آینه داخلی (Nexus/Artifactory)؛ نسخه‌ها pin؛ SBOM برای هر انتشار | ۰ | `uv lock`، `package-lock.json`، CycloneDX |
-| AFTA-03 | احراز هویت | OIDC با Keycloak؛ MFA اجباری برای نقش‌های مدیر و تأییدکننده؛ سیاست رمز عبور و قفل حساب | ۱ | Keycloak realm policy |
-| AFTA-04 | کنترل دسترسی | RBAC سه‌سطحی + محدوده جغرافیایی (ملی/استان/شهر)؛ بررسی مجوز در هر endpoint سمت سرور | ۱ | وابستگی FastAPI `require_permission` |
+| AFTA-03 | احراز هویت | OIDC با Keycloak؛ MFA اجباری برای نقش‌های مدیر و تأییدکننده؛ سیاست رمز عبور و Brute Force Detection | ۰ | `infra/keycloak/bootstrap.sh` (P0.5) |
+| AFTA-04 | کنترل دسترسی | RBAC سه‌سطحی (نقش‌های ریلم) + محدوده جغرافیایی (Group کیکلاک)؛ بررسی مجوز در هر endpoint سمت سرور | ۱ | وابستگی FastAPI `require_permission` |
 | AFTA-05 | تفکیک وظایف | نویسنده پیام نمی‌تواند تأییدکننده همان پیام باشد؛ تغییر قاعده نیاز به تأیید نفر دوم دارد | ۲ | قاعده در Workflow |
-| AFTA-06 | مدیریت نشست | توکن دسترسی کوتاه‌عمر (≤ ۱۵ دقیقه)، refresh چرخشی، خروج سراسری، timeout بی‌فعالیتی | ۱ | Keycloak + فرانت |
-| AFTA-07 | رویدادنگاری و حسابرسی | Audit Trail غیرقابل تغییر (زنجیره هش)، ثبت ورود، خروج، تلاش ناموفق، تغییر دسترسی، تأیید و انتشار؛ ارسال به SIEM/SOC کارفرما (syslog/CEF) | ۱ | ماژول `audit` |
+| AFTA-06 | مدیریت نشست | توکن دسترسی کوتاه‌عمر (≤ ۱۵ دقیقه)، refresh چرخشی، خروج سراسری، timeout بی‌فعالیتی | ۰ | تنظیمات ریلم در P0.5 + فرانت |
+| AFTA-07 | رویدادنگاری و حسابرسی | Keycloak مرجع واحد Audit: رویدادهای کاربر و ادمین + اقدامات کسب‌وکاری از طریق `crisis-audit-spi`؛ زنجیره هش، append-only، ارسال به SIEM/SOC کارفرما (syslog/CEF) | ۰–۱ | P0.5، P1.1 |
 | AFTA-08 | همگام‌سازی زمان | همه سرورها با NTP داخلی؛ زمان رویدادها UTC با منطقه زمانی صریح | ۰ | زیرساخت |
 | AFTA-09 | رمزنگاری در انتقال | TLS 1.2+ (ترجیحاً 1.3) برای همه ارتباطات، از جمله داخل کلاستر (mTLS) | ۶ | Ingress + service mesh یا mTLS |
 | AFTA-10 | رمزنگاری در ذخیره | رمزنگاری دیسک و پشتیبان؛ رمزنگاری سطح فیلد برای داده شخصی شهروند (شماره تلفن، موقعیت دقیق) | ۲ | `cryptography` + KMS/Vault داخلی |
@@ -177,6 +206,7 @@ modules/<name>/
 | AFTA-20 | مدیریت آسیب‌پذیری | SAST (ruff-S، Semgrep)، SCA (pip-audit، npm audit)، اسکن image (Trivy)، DAST (OWASP ZAP) در CI؛ هیچ یافته High/Critical باز در انتشار | ۰ | |
 | AFTA-21 | ارزیابی نفوذ | Pen-Test توسط آزمایشگاه مورد تأیید افتا پیش از پایلوت؛ رفع یافته‌ها | ۶ | |
 | AFTA-22 | مستندات امنیتی | سند معماری امنیت، مدل تهدید (STRIDE)، چک‌لیست ASVS، رویه پاسخ به حادثه، Runbook | ۶ | `docs/security/` |
+| AFTA-24 | امنیت Keycloak | کنسول ادمین و ریلم `master` فقط از شبکه مدیریت؛ پایگاه داده جدا؛ اجرای production mode با TLS؛ پشتیبان و تست بازیابی ریلم‌ها | ۶ | P6.3، P6.5 |
 | AFTA-23 | مدیریت تغییر | هر تغییر از طریق Pull Request با بازبینی؛ شاخه main محافظت‌شده؛ امضای commit و image | ۰ | |
 
 ---
@@ -200,16 +230,16 @@ modules/<name>/
 
 ### فاز ۰ — زیرساخت و اسکلت (هفته ۱–۲)
 
-- **پوشش:** NFR-08، NFR-16، AFTA-01، 02، 08، 11، 13، 14، 20، 23.
-- **خروجی:** مخزن monorepo، `docker compose up` کل محیط را بالا می‌آورد، CI با lint، type check، تست، SAST، SCA و SBOM.
-- **معیار اتمام:** CI روی main سبز؛ `/health` و `/ready` پاسخ می‌دهند؛ صفحه ورود فرانت با Keycloak کار می‌کند.
-- **پرامپت‌ها:** P0.1 تا P0.4.
+- **پوشش:** NFR-08، NFR-09، NFR-16، AFTA-01، 02، 03، 06، 07، 08، 11، 13، 14، 20، 23.
+- **خروجی:** مخزن monorepo، `docker compose up` کل محیط را بالا می‌آورد، CI با lint، type check، تست، SAST، SCA و SBOM، Keycloak با ریلم‌های `crisis-ops` و `crisis-citizen` که فقط با اسکریپت ساخته می‌شوند.
+- **معیار اتمام:** CI روی main سبز؛ `/health` و `/ready` پاسخ می‌دهند؛ اجرای دوباره `bootstrap.sh` بدون خطا و بدون تغییر است؛ ورود فرانت با Keycloak و تم فارسی کار می‌کند؛ ورود ناموفق در رویدادهای Keycloak دیده می‌شود.
+- **پرامپت‌ها:** P0.1 تا P0.5 (P0.5 پیش از P0.4 اجرا شود).
 
 ### فاز ۱ — هویت، پرونده بحران، منابع (هفته ۳–۸)
 
-- **پوشش:** FR-01.1، FR-02.1، FR-05.1، FR-17.1 (اسکلت)، TR-T1، TR-T2.1، TR-T11، NFR-09، NFR-12، AFTA-03 تا 07، 12.
-- **خروجی:** ورود با نقش و محدوده جغرافیایی، ثبت دستی بحران و تحلیل اولیه، Source Registry با کانکتورهای فایل، REST، DB و RSS، رویدادهای Kafka با Outbox.
-- **معیار اتمام:** سناریوی «کارشناس استان تهران بحران زلزله را ثبت می‌کند» end-to-end اجرا شود و در Audit ثبت شود؛ کاربر استان مرکزی پرونده تهران را نبیند.
+- **پوشش:** FR-01.1، FR-02.1، FR-05.1، FR-17.1 (اسکلت)، TR-T1، TR-T2.1، TR-T11، NFR-12، AFTA-04، 05، 07، 12.
+- **خروجی:** مجوزدهی با نقش و Group کیکلاک، ثبت اقدامات کسب‌وکاری در Audit کیکلاک، ثبت دستی بحران و تحلیل اولیه، Source Registry با کانکتورهای فایل، REST، DB و RSS، رویدادهای Kafka با Outbox.
+- **معیار اتمام:** سناریوی «کارشناس استان تهران بحران زلزله را ثبت می‌کند» end-to-end اجرا شود و رویداد آن در Audit کیکلاک دیده شود؛ کاربر استان مرکزی پرونده تهران را نبیند.
 - **پرامپت‌ها:** P1.1 تا P1.5.
 
 ### فاز ۲ — کیفیت، قواعد، گردش کار (هفته ۹–۱۲)
@@ -287,7 +317,7 @@ modules/<name>/
 
 1. پرامپت‌ها به ترتیب اجرا می‌شوند؛ هر پرامپت روی یک شاخه جدا و با یک Pull Request.
 2. پرامپت P0.1 فایل `CLAUDE.md` را در ریشه مخزن می‌سازد. این فایل قواعد ثابت پروژه را دارد و در هر جلسه خوانده می‌شود؛ پرامپت‌های بعدی آن را تکرار نمی‌کنند.
-3. هر پرامپت شناسه نیازمندی‌های SRS را نام می‌برد. پیش از شروع، بخش مربوط در `docs/SRS.md` و `docs/SAS.md` خوانده شود.
+3. P0.5 پیش از P0.4 اجرا می‌شود چون فرانت به ریلم آماده نیاز دارد. هر پرامپت شناسه نیازمندی‌های SRS را نام می‌برد. پیش از شروع، بخش مربوط در `docs/SRS.md` و `docs/SAS.md` خوانده شود.
 4. PR فقط وقتی ادغام می‌شود که CI سبز باشد و معیارهای پذیرش پرامپت تیک خورده باشد.
 5. هر تصمیم معماری جدید به‌صورت ADR در `docs/adr/` ثبت می‌شود.
 
@@ -307,7 +337,10 @@ modules/<name>/
   (line-length=79، convention=pep257، mypy strict).
 - frontend/: Vite + React 18 + TypeScript strict، ESLint، Prettier، Vitest.
 - infra/docker-compose.yml: PostgreSQL 16 با PostGIS و pgvector، Kafka در حالت KRaft،
-  Redis، MinIO، Keycloak. همه image ها با نسخه pin شده؛ هیچ پورتی جز موارد لازم باز نباشد.
+  Redis، MinIO، Keycloak 26 با پایگاه داده PostgreSQL جداگانه (نه H2، نه DB برنامه).
+  همه image ها با نسخه pin شده؛ هیچ پورتی جز موارد لازم باز نباشد.
+  سرویس keycloak-bootstrap که پس از سالم شدن Keycloak، infra/keycloak/bootstrap.sh
+  را اجرا کند (محتوای اسکریپت در P0.5 ساخته می‌شود؛ اینجا فقط جای آن را بگذار).
 - pre-commit با ruff، ruff-format، mypy، eslint، gitleaks.
 - Makefile با فرمان‌های dev، test، lint، typecheck، migrate.
 - CLAUDE.md در ریشه با خلاصه قواعد بخش ۲ و ۳ پلن.
@@ -359,9 +392,12 @@ modules/<name>/
 - MUI v5 با RTL (stylis-plugin-rtl و @emotion/cache)، تم فارسی، فونت Vazirmatn
   به‌صورت self-hosted در public/fonts.
 - i18n با react-i18next؛ زبان پیش‌فرض fa، فایل locales/fa.json.
-- ورود با OIDC Authorization Code + PKCE به Keycloak (oidc-client-ts)؛
+- پیش‌نیاز: P0.5 اجرا شده باشد.
+- ورود با OIDC Authorization Code + PKCE به ریلم crisis-ops و کلاینت crisis-web
+  (oidc-client-ts)؛ آدرس Keycloak و نام ریلم از متغیر محیطی build؛
   توکن فقط در حافظه، نه localStorage؛ refresh خودکار؛ خروج سراسری (AFTA-06).
-- layout با منوی کناری، نوار بالا با نام کاربر، نقش و استان.
+- نقش‌ها و geo_scope فقط برای نمایش منو از توکن خوانده شوند؛ تصمیم دسترسی همیشه سمت سرور است.
+- layout با منوی کناری، نوار بالا با نام کاربر، نقش و استان (از geo_scope).
 - react-router با مسیرهای محافظت‌شده بر اساس نقش.
 - تولید خودکار کلاینت تایپ‌دار از OpenAPI بک‌اند با openapi-typescript و
   یک wrapper برای TanStack Query.
@@ -370,26 +406,123 @@ modules/<name>/
 تست Vitest برای guard مسیرها.
 ```
 
-### فاز ۱
-
-#### P1.1 — هویت، دسترسی و Audit (T11)
+#### P0.5 — راه‌اندازی Keycloak و ساخت ریلم‌ها با اسکریپت
 
 ```text
-SRS: NFR-09، NFR-11، NFR-12. پلن: AFTA-03 تا AFTA-07.
-- infra/keycloak: realm export با کلاینت‌های backend و frontend، نقش‌ها:
-  national_admin، national_manager، provincial_manager، local_manager،
-  crisis_operator، data_officer، system_admin. MFA اجباری برای همه نقش‌های manager و admin.
-  ویژگی کاربر geo_scope (مثلاً national یا province:tehran یا city:tehran/...).
-- ماژول iam: اعتبارسنجی JWT با JWKS (کش‌شده)، مدل Principal (Pydantic)،
-  وابستگی require_permission(permission, geo) که هم نقش و هم محدوده جغرافیایی را
-  سمت سرور بررسی کند. نگاشت نقش به مجوز در یک جای واحد.
-- ماژول audit: جدول append-only با زنجیره هش (hash هر رکورد شامل hash قبلی)؛
-  ثبت actor، action، resource، geo، نتیجه، IP، زمان؛ سرویس verify_chain؛
-  خروجی syslog/CEF قابل‌تنظیم برای SIEM کارفرما. کاربر DB برنامه مجوز UPDATE و
-  DELETE روی این جدول نداشته باشد.
-- API: GET /api/v1/audit با فیلتر (فقط system_admin و national_admin).
-معیار پذیرش: تست‌هایی که نشان دهد کاربر استان مرکزی به منبع تهران 403 می‌گیرد؛
-دستکاری یک رکورد audit با verify_chain کشف می‌شود؛ هر ورود ناموفق ثبت می‌شود.
+پلن: بخش ۱-۳ (ریلم‌ها، Group ها، Audit)، AFTA-03، AFTA-06، AFTA-07. SRS: NFR-09، NFR-12.
+هیچ تنظیمی در کنسول ادمین دستی انجام نشود؛ همه چیز از این اسکریپت‌ها بیاید.
+
+۱) infra/keycloak/config/: تعریف اعلانی (YAML یا JSON) به‌عنوان منبع حقیقت:
+- ریلم crisis-ops:
+  نقش‌های ریلم: national_admin، national_manager، provincial_manager، local_manager،
+  crisis_operator، data_officer، system_admin، و نقش فنی audit-writer.
+  Group های سلسله‌مراتبی با ویژگی geo_scope: /national، /province/tehran،
+  /province/markazi، /province/hormozgan و زیرگروه‌های city هر استان
+  (فهرست شهرها از فایل config/geo.yaml تا کارفرما بتواند تکمیل کند).
+  کلاینت‌ها: crisis-web (public، PKCE S256، redirect URI و web origin دقیق، بدون wildcard)،
+  crisis-api (confidential، فقط برای اعتبارسنجی و audience)، crisis-worker
+  (service account برای ارتباط سرویس به سرویس، نقش audit-writer)،
+  crisis-audit-reader (service account فقط با view-events).
+  Protocol Mapper: نقش‌های ریلم، geo_scope از Group، audience=crisis-api.
+- ریلم crisis-citizen: ثبت‌نام آزاد، تأیید ایمیل یا تلفن، کلاینت citizen-pwa
+  (public، PKCE)؛ هیچ نقش مدیریتی؛ توکن بدون داده شخصی اضافه.
+- سیاست‌ها در هر دو ریلم: password policy (طول ≥ ۱۲، پیچیدگی، عدم تکرار ۵ رمز قبلی،
+  عدم استفاده از نام کاربری)، Brute Force Detection فعال، access token ≤ ۱۵ دقیقه،
+  SSO idle و max مصوب، refresh token rotation، SSL required=all در production.
+- OTP اجباری: Required Action برای همه اعضای نقش‌های manager، admin و data_officer،
+  و یک Authentication Flow شرطی که برای این نقش‌ها OTP را الزامی کند.
+- رویدادها در هر سه ریلم (master، crisis-ops، crisis-citizen): eventsEnabled،
+  adminEventsEnabled، adminEventsDetailsEnabled، فهرست کامل نوع رویدادهای کاربر
+  (LOGIN، LOGIN_ERROR، LOGOUT، CODE_TO_TOKEN، REFRESH_TOKEN، UPDATE_PASSWORD،
+  UPDATE_TOTP، REMOVE_TOTP و ...)، eventsExpiration طبق سیاست نگهداری از متغیر محیطی،
+  Event Listener ها: jboss-logging و crisis-audit (از P1.1).
+- تم crisis-fa برای صفحه ورود: فارسی، RTL، فونت Vazirmatn محلی، بدون منبع خارجی؛
+  پیام‌های فارسی در messages_fa.properties.
+
+۲) infra/keycloak/bootstrap.sh (bash با set -euo pipefail):
+- با kcadm.sh داخل کانتینر Keycloak وارد ریلم master شود؛ نام کاربری و رمز ادمین فقط
+  از متغیر محیطی یا فایل secret (هیچ مقدار پیش‌فرض در کد؛ AFTA-11).
+- منتظر سالم شدن Keycloak بماند (health/ready با timeout).
+- idempotent باشد: هر شیء را اگر وجود دارد به‌روزرسانی و اگر ندارد ایجاد کند؛
+  اجرای دوم هیچ تغییری ندهد و خطا ندهد.
+- ورودی: ENV=dev|test|prod. در dev و test کاربران آزمایشی برای هر نقش و هر استان
+  بسازد (رمز تصادفی، چاپ در فایل .secrets محلی که در .gitignore است)؛ در prod هرگز
+  کاربر آزمایشی نسازد.
+- client secret های confidential را بسازد یا بچرخاند و در Vault یا Kubernetes Secret
+  (بر اساس ENV) بنویسد؛ هرگز در خروجی استاندارد چاپ نکند.
+- ریلم master را سخت کند: غیرفعال کردن ثبت‌نام، OTP برای ادمین، رویدادها فعال.
+- در پایان خروجی partial export هر ریلم (بدون secret و کاربر) را در
+  infra/keycloak/exports/ بنویسد تا تفاوت‌ها در بازبینی PR دیده شود.
+- اسکریپت infra/keycloak/verify.sh: با API ادمین بررسی کند که پیکربندی فعلی با
+  config یکی است (drift detection) و در صورت تفاوت با کد خروج غیرصفر تمام شود.
+
+۳) یکپارچگی:
+- سرویس keycloak-bootstrap در docker-compose و Job همین اسکریپت در Helm (برای P6.3).
+- مرحله CI: Keycloak در testcontainer بالا بیاید، bootstrap.sh دو بار اجرا شود و
+  verify.sh پاس شود.
+- docs/keycloak.md: راهنمای اجرا، افزودن استان یا شهر جدید (فقط با ویرایش geo.yaml و
+  اجرای مجدد اسکریپت)، چرخش secret.
+
+معیار پذیرش:
+- `make keycloak-bootstrap` روی محیط خالی هر دو ریلم را کامل می‌سازد.
+- اجرای دوم بدون تغییر و بدون خطا است؛ verify.sh پاس می‌شود.
+- توکن کاربر آزمایشی provincial_manager تهران شامل نقش و geo_scope=province:tehran است.
+- کاربر manager بدون OTP نمی‌تواند وارد شود.
+- ورود ناموفق در رویدادهای کاربر و ایجاد کاربر در رویدادهای ادمین ریلم دیده می‌شود.
+- در ENV=prod هیچ کاربر آزمایشی ساخته نمی‌شود.
+```
+
+### فاز ۱
+
+#### P1.1 — مجوزدهی و Audit مبتنی بر Keycloak (T11)
+
+```text
+SRS: NFR-09، NFR-11، NFR-12. پلن: بخش ۱-۳، AFTA-04، AFTA-05، AFTA-07.
+پیش‌نیاز: P0.5. ریلم‌ها و کلاینت‌ها را تغییر نده مگر از طریق config و bootstrap.sh.
+
+۱) افزونه infra/keycloak/crisis-audit-spi (Java 17، Maven، وابستگی‌های Keycloak با
+   scope=provided و نسخه برابر Keycloak مستقر):
+- RealmResourceProvider با مسیر /realms/{realm}/crisis-audit/events:
+  POST فقط با bearer token کلاینتی که نقش audit-writer دارد؛ بدنه شامل
+  event_id (برای idempotency)، occurred_at، actor_sub، actor_session_id، action،
+  resource_type، resource_id، geo_scope، outcome، details (محدود به ۸KB).
+  ورودی سخت‌گیرانه اعتبارسنجی شود؛ event_id تکراری نادیده گرفته شود.
+- EventListenerProvider به نام crisis-audit که رویدادهای کاربر، ادمین و رویدادهای
+  کسب‌وکاری را در جدول append-only crisis_audit_log (در DB کیکلاک، با Liquibase یا
+  JPA entity provider) با زنجیره هش ذخیره کند: hash = SHA-256(prev_hash + رکورد کانونیک).
+- ارسال همزمان هر رکورد به SIEM کارفرما با syslog (RFC 5424) یا CEF روی TLS؛
+  مقصد از تنظیمات SPI.
+- GET /realms/{realm}/crisis-audit/events با فیلتر (کاربر، اقدام، منبع، بازه زمانی،
+  geo) و صفحه‌بندی، فقط برای نقش view-events؛ و endpoint verify برای بررسی زنجیره هش.
+- تست واحد جاوا و تست یکپارچگی با Keycloak در testcontainer.
+- build در CI و کپی jar در image سفارشی Keycloak (infra/keycloak/Dockerfile)؛
+  bootstrap.sh listener را در ریلم‌ها فعال کند.
+
+۲) ماژول iam در بک‌اند:
+- اعتبارسنجی JWT ریلم‌های crisis-ops و crisis-citizen با JWKS کش‌شده و چرخش کلید؛
+  بررسی iss، aud=crisis-api، exp، و azp مجاز.
+- مدل Pydantic به نام Principal: sub، session_id (sid)، realm، roles، geo_scope.
+- وابستگی require_permission(permission, geo) که نقش و محدوده جغرافیایی را سمت سرور
+  بررسی کند؛ نگاشت نقش به مجوز در یک جای واحد (permissions.py).
+- قاعده تفکیک وظایف (AFTA-05) به‌صورت تابع مشترک برای ماژول‌های workflow و rules.
+
+۳) ماژول audit در بک‌اند (بدون جدول Audit در DB برنامه):
+- AuditClient.record(action, resource, outcome, details) که با توکن service account
+  crisis-worker به endpoint افزونه ارسال کند؛ کاربر و session از Principal درخواست.
+- Outbox محلی: اگر Keycloak در دسترس نبود، رکورد در جدول audit_outbox بماند و
+  worker با retry ارسال کند؛ پس از تأیید، رکورد Outbox حذف شود. هیچ اقدامی بدون
+  رکورد Audit یا Outbox commit نشود (در همان تراکنش).
+- API: GET /api/v1/audit که با کلاینت crisis-audit-reader از Keycloak بخواند و
+  رویدادهای کاربر، ادمین و کسب‌وکاری را در یک نمای واحد برگرداند
+  (فقط system_admin و national_admin).
+- فرانت: صفحه Audit با فیلتر و نمایش وضعیت زنجیره هش.
+
+معیار پذیرش:
+- کاربر استان مرکزی به منبع تهران 403 می‌گیرد و این رد دسترسی در Audit کیکلاک ثبت می‌شود.
+- ورود ناموفق، ایجاد کاربر و یک اقدام کسب‌وکاری هر سه در صفحه Audit دیده می‌شوند.
+- دستکاری مستقیم یک ردیف در crisis_audit_log با endpoint verify کشف می‌شود.
+- با Keycloak خاموش، اقدام کسب‌وکاری انجام و در Outbox می‌ماند؛ پس از روشن شدن ارسال می‌شود.
+- event_id تکراری دو رکورد نمی‌سازد.
 ```
 
 #### P1.2 — پرونده بحران و تریگر دستی (T1، T10)
@@ -404,7 +537,7 @@ SRS: FR-01.1، FR-02.1، FR-17.1 و بخش ۶-۱ (موجودیت Crisis Case). S
   (فقط در محدوده جغرافیایی کاربر)، تغییر وضعیت توسط مدیر مجاز.
 - پس از هر تغییر، رویداد crisis.triggered یا crisis.updated با الگوی Outbox
   (جدول outbox در همان تراکنش + انتشاردهنده به Kafka).
-- همه عملیات در audit ثبت شود.
+- همه عملیات با AuditClient در Audit کیکلاک ثبت شود (P1.1).
 - فرانت: صفحه فهرست بحران‌ها، فرم ثبت بحران با انتخاب موقعیت روی نقشه
   (MapLibre با کاشی محلی)، فرم خلاصه اولیه.
 معیار پذیرش: تست State Machine برای همه انتقال‌ها؛ تست Outbox (رویداد فقط پس از commit)؛
@@ -469,7 +602,7 @@ SRS: FR-06.1، TR-T4.1، TR-T4.2، DR-01. SAS: بخش ۵.
 - لایه Curated در PostgreSQL؛ داده ناقص به Quarantine با علت (حذف نشود).
 - Lineage: هر رکورد Curated شناسه ingest_id و فهرست تبدیل‌ها را نگه دارد.
 - قواعد کیفیت قطعی قابل تعریف در جدول quality_rules.
-- API و صفحه بازبینی قرنطینه برای data_officer: مشاهده، اصلاح، آزادسازی یا رد (با audit).
+- API و صفحه بازبینی قرنطینه برای data_officer: مشاهده، اصلاح، آزادسازی یا رد (ثبت در Audit کیکلاک).
 معیار پذیرش: تست برای هر قاعده؛ رکورد با مختصات خارج از ایران به قرنطینه برود؛
 مسیر Lineage از رکورد Curated تا فایل Raw قابل پیمایش باشد.
 ```
@@ -481,7 +614,8 @@ SRS: FR-04.1، FR-07.1، FR-08.1، TR-T5.1. SAS: Rule Engine و ADR-03.
 - ماژول rules: قاعده به‌صورت داده (JSON اعتبارسنجی‌شده با Pydantic)، نه کد اجرایی؛
   هیچ eval یا exec. عملگرها: مقایسه، بازه، فاصله مکانی، پنجره زمانی، and/or.
 - نسخه‌بندی قواعد؛ هر نسخه وضعیت draft، tested، active دارد. فعال‌سازی نیاز به
-  تأیید نفر دوم دارد (AFTA-05).
+  تأیید نفر دوم دارد (AFTA-05، تابع تفکیک وظایف P1.1)؛ ایجاد، تست و فعال‌سازی هر نسخه
+  در Audit کیکلاک ثبت شود.
 - ارزیاب: ورودی رخداد و داده Curated، خروجی شدت، محدوده، نوع اثر و وضعیت
   significant/not_significant به‌همراه فهرست قواعد فعال‌شده (دلایل).
 - قواعد نمونه سناریوی زلزله: بزرگی، عمق، فاصله از مراکز جمعیتی (آستانه‌ها قابل تنظیم).
@@ -500,7 +634,12 @@ SRS: FR-09.1، FR-10.1، FR-12.1، FR-13.1، TR-T7.1. SAS: Workflow Engine.
   منطقه، کانال، فوریت.
 - مسیر تأیید پیکربندی‌پذیر بر اساس سطح: سطح ۱ بدون تأیید، سطح ۲ یک تأیید، سطح ۳
   زنجیره کارشناس → مدیر استانی → مسئول کشوری. نویسنده نمی‌تواند تأییدکننده باشد.
-- عملیات تأیید، رد، بازگشت برای اصلاح، با ثبت زمان پاسخ و توضیح.
+- تأییدکننده هر مرحله با نقش ریلم و Group جغرافیایی Keycloak تعیین شود (مثلاً
+  provincial_manager در /province/tehran)؛ فهرست تأییدکنندگان واجد شرایط از
+  API ادمین Keycloak با کلاینت crisis-worker خوانده و کش شود. هیچ فهرست کاربر
+  موازی در DB برنامه نگه داشته نشود.
+- عملیات تأیید، رد، بازگشت برای اصلاح، با ثبت زمان پاسخ و توضیح؛ هر عمل با
+  session_id کیکلاک در Audit ثبت شود.
 - در این فاز انتشار واقعی نداریم؛ فقط رویداد message.approved.
 - فرانت: صندوق کار کارشناس، صفحه بررسی پیش‌نویس، صفحه تأیید.
 معیار پذیرش: تست همه مسیرها؛ تست منفی: پیام سطح ۳ با یک تأیید به approved نرسد.
@@ -661,9 +800,13 @@ SRS: FR-09.2، TR-T6.1، TR-T6.2، NFR-02، NFR-13. پلن: AFTA-16.
 ```text
 SRS: FR-11.2، FR-12.2، FR-13.2، FR-20، FR-21.
 - انتشار خودکار سطح ۱ فقط از قالب‌های مصوب کم‌ریسک.
-- سطح ۲: تأیید مدیر محلی یا استانی با SLA؛ Escalation خودکار در صورت عبور از SLA.
+- سطح ۲: تأیید مدیر محلی یا استانی با SLA؛ Escalation خودکار در صورت عبور از SLA
+  به Group والد در ساختار جغرافیایی Keycloak (شهر → استان → ملی).
+- تأیید پیام سطح ۲ و ۳ نیاز به step-up authentication دارد: توکن باید با OTP در همان
+  session صادر شده باشد (بررسی acr یا amr در توکن)؛ در غیر این صورت کاربر به
+  احراز مجدد با OTP هدایت شود.
 - سطح ۳: زنجیره کامل؛ انتشار خودکار پیام حساس ممنوع؛ همه شرایط FR-21 بررسی شود.
-- دکمه توقف اضطراری انتشار (سراسری و به‌ازای پیام) با audit.
+- دکمه توقف اضطراری انتشار (سراسری و به‌ازای پیام)، فقط برای نقش‌های مجاز ریلم crisis-ops و ثبت در Audit کیکلاک.
 - نمایش منشأ هر پیام (مدل، اپراتور، قالب).
 معیار پذیرش: تست‌های منفی گسترده برای سطح ۳؛ تست Escalation با زمان مصنوعی.
 ```
@@ -685,6 +828,10 @@ SRS: FR-03.2، FR-14.2، TR-T8.1، IF-08، IF-09.
 SRS: FR-22، FR-23.
 - گردش کار ارزیابی خبر: ثبت منبع و مسیر، امتیاز اعتبار، مقایسه با منابع رسمی،
   طبقه‌بندی شش‌گانه FR-22؛ برچسب «خبر جعلی» فقط با تأیید مرجع مجاز.
+- PWA شهروندی با ریلم crisis-citizen و کلاینت citizen-pwa: مشاهده هشدارها بدون ورود؛
+  ورود فقط برای ارسال گزارش و پیگیری. تأیید شماره تلفن با OTP پیامکی نیاز به
+  Authenticator سفارشی Keycloak متصل به درگاه SMS کارفرما دارد؛ آن را در همان
+  پروژه SPI (P1.1) پیاده کن و در bootstrap.sh فعال کن.
 - PWA شهروندی: وضعیت هشدارهای منطقه، گزارش مردمی با عکس و موقعیت
   (حذف EXIF، محدودیت اندازه، اسکن فایل)، پیگیری تیکت، نوتیفیکیشن.
 - داده شخصی شهروند رمزنگاری‌شده و کمینه (AFTA-10، NFR-11).
@@ -724,6 +871,11 @@ SRS: FR-19.2، NFR-06، NFR-07.
   تأخیر، خطا، صف‌ها، سلامت منابع.
 - Helm chart با HPA، PodDisruptionBudget، Kafka با replication، PostgreSQL با
   replica و پشتیبان رمزنگاری‌شده؛ مستند DR با RPO و RTO.
+- Keycloak در حالت cluster (حداقل دو نمونه، کش توزیع‌شده)، پایگاه داده جدا با replica،
+  Job اجرای bootstrap.sh و verify.sh در هر استقرار، پشتیبان روزانه DB کیکلاک
+  (شامل crisis_audit_log) و تست بازیابی ریلم‌ها.
+- هشدار برای: افزایش LOGIN_ERROR، پر شدن audit_outbox، شکست ارسال به SIEM،
+  و drift پیکربندی ریلم.
 - تمرین Chaos (قطع پاد، قطع منبع، قطع کانال) و ثبت نتایج در docs/ops.
 معیار پذیرش: گزارش تمرین Fail/Recover؛ تست بازیابی پشتیبان.
 ```
@@ -740,12 +892,15 @@ SRS: NFR-01 تا NFR-05.
 #### P6.5 — بسته آمادگی افتا
 
 ```text
-پلن: بخش ۳ (AFTA-01 تا AFTA-23).
+پلن: بخش ۳ (AFTA-01 تا AFTA-24).
 - docs/security/: سند معماری امنیت، مدل تهدید STRIDE برای هر ماژول،
   چک‌لیست OWASP ASVS سطح ۲ با وضعیت هر کنترل، رویه پاسخ به حادثه،
   ماتریس کنترل‌های AFTA به کد و تست.
 - سخت‌سازی: image های non-root و حداقلی، NetworkPolicy برای تفکیک ناحیه‌ها،
   mTLS داخلی، CIS Benchmark.
+- سخت‌سازی Keycloak (AFTA-24): کنسول ادمین و ریلم master فقط از شبکه مدیریت،
+  production mode با TLS، غیرفعال بودن ویژگی‌های بی‌استفاده، بررسی redirect URI ها،
+  مرور دوره‌ای کاربران و نقش‌ها با گزارش از API ادمین.
 - اجرای DAST (OWASP ZAP) روی محیط تست؛ رفع یافته‌ها.
 - آماده‌سازی محیط و مستندات برای Pen-Test آزمایشگاه مورد تأیید افتا.
 معیار پذیرش: هیچ یافته High/Critical باز؛ همه ردیف‌های ماتریس AFTA شواهد دارند.
@@ -758,6 +913,9 @@ SRS: NFR-01 تا NFR-05.
 ```text
 SRS: بخش ۷-۱ (معیار پایان ماه ۸).
 - values جداگانه Helm برای سه استان (تهران، مرکزی، هرمزگان) و سطح ملی.
+- اجرای bootstrap.sh با ENV=prod؛ تکمیل geo.yaml با شهرهای نهایی؛ ایجاد کاربران
+  واقعی و عضویت در Group ها از فایل تحویلی کارفرما با اسکریپت
+  infra/keycloak/import_users.sh (بدون رمز؛ کاربر در اولین ورود رمز و OTP تنظیم کند).
 - اسکریپت‌های UAT در docs/acceptance/M8.md برای همه نیازمندی‌های «.2».
 - Runbook عملیاتی، راهنمای کاربری (مدیر، کارشناس، تأییدکننده، شهروند)،
   راهنمای مدیریت مدل و محتوای چت‌بات.
@@ -777,3 +935,6 @@ SRS: بخش ۷-۱ (معیار پایان ماه ۸).
 | حدود عددی شاخص‌های NFR-13 و ظرفیت NFR-05 | تعیین در سند پذیرش | SRS ۷-۱ |
 | فهرست منابع، کانال‌ها و پیام‌رسان‌های مجاز هر استان | مرحله اول پایلوت | SRS ۲-۴ |
 | مخزن آینه بسته‌ها و رجیستری image داخلی | تأمین توسط کارفرما | AFTA-02 |
+| Keycloak به‌عنوان مرجع Audit کسب‌وکاری با افزونه SPI (ADR-09) | تأیید؛ یا جایگزین: Keycloak فقط برای رویدادهای هویتی و Audit کسب‌وکاری در سرویس جدا | ۱-۳ |
+| درگاه SMS برای OTP شهروندان در Keycloak | تأمین API درگاه توسط کارفرما | P5.5 |
+| زمان نگهداری رویدادهای Audit و مقصد SIEM/SOC | تعیین توسط کارفرما | P0.5، P1.1 |
